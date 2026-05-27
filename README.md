@@ -1,109 +1,156 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/bW3IHNmb)
-# Introduction to the Development Environment
+# Axiom-Parallel: Multi-Dimensional LLM Distributed Training Infrastructure
 
+A highly structured, production-ready framework implementing multi-dimensional (3D) parallelism strategies for Large Language Models. This repository contains the core communication primitives, custom layer abstractions, and execution pipelines required to scale models that exceed individual GPU memory thresholds.
 
-This programming assignment/lab is in a Jupyter notebook (`assignment.ipynb`).  To run it'll you'll need to
-check out the lab.
+---
 
-This document describe how to do those two things.  Then, you'll be able to
-open the Jupyter notebook and proceed with lab itself.
+## 📌 Table of Contents
 
-# Software You Will Need
+- [The Problem: The Memory & Compute Wall](#the-problem-the-memory--compute-wall)
+- [The Solution: Unified 3D Parallelism](#the-solution-unified-3d-parallelism)
+- [Architecture & Directory Structure](#architecture--directory-structure)
+- [Step-by-Step Implementation Guide](#step-by-step-implementation-guide)
+- [Performance Benchmarking & Instrumentation](#performance-benchmarking--instrumentation)
 
-**Note** Safari and Internet Explorer are not currently supported.  This will
-probably be fixed by the next lab, but for this lab you should use Chrome
-(first choice, most tested) or Firefox.  Edge Seems to be ok.
+---
 
-Jupyter Notebook is an interactive computing enviroment for gathering and
-displaying data (among other things).
+## 💡 The Problem: The Memory & Compute Wall
 
-The content for each lab will be distributed via github classroom.
+As Large Language Models scale past tens of billions of parameters, training or serving them on a single hardware accelerator becomes mathematically impossible due to two structural constraints:
 
-So, to do the lab of this course, you need:
-1. You'll need to log into https://escalab.org/datahub to run a jupyter notebook. 
-2. Tha asssignment from github classroom.  Find the link on the course 
-home page: https://www.escalab.org/classes/cs203-2025fa/
+- **The Memory Wall:** An `80GB` GPU cannot simultaneously hold model weights, optimizer states (e.g., Adam's FP32 copies), gradients, and activation tensors.
+- **The Compute Wall:** The trillions of floating-point operations (`FLOPs`) required for convergence make sequential or single-device execution logistically non-viable.
 
-## Connecting to cs203 jupyterhub 
+### Traditional Bottlenecks
 
-The first step is to navigate your browser to 
-https://escalab.org/datahub
+| Bottleneck | Root Cause |
+|---|---|
+| **Naive Data Parallelism** | The entire model must fit on every single GPU |
+| **Unoptimized Tensor Splitting** | Constant synchronization causes massive network latency during forward and backward passes |
+| **Pipeline Bubbles** | Poor execution scheduling leads to idle GPUs and severe resource underutilization |
 
-One of two things will happen:
+---
 
-1. You'll find yourself at a nice home page and you can click the big orange "Log In" button. 
+## 🛠️ The Solution: Unified 3D Parallelism
 
-2. If you've used the system before/recently it might drop you directly into a jupyter notebook file browser.
+This repository implements **Multi-Dimensional (3D) Parallelism**, decoupling the model across three independent but complementary structural axes to maximize hardware utilization (MFU) and communication efficiency.
 
-If you it's #2, you will need to click "Control Panel" (upper right) and then
-click the big red "Stop My Server" button, if it's there.  If it's not, that's
-fine.  Then click "Logout" (upper right) to get back to the homepage and the
-big orange button.
+### 1. Tensor Parallelism (TP)
 
-Now, click the big orange button and login with your `@ucsd.edu` email address.
-After a progress bar, you'll end up at the Jupyter Notebook file browser.
-Looking at an empty directory (unless you've used the Datahub before, in which
-case your old files will be there).  In any case, you don't have a lab to do
-yet.
+**Strategy:** Intra-layer splitting across the hidden dimension, based on Megatron-style architectures.
 
-You can now proceed with the instructions below for cloning the lab repo.  Once
-you complete them, you can return to the Jupyter Notebook file browser and open
-your lab notebook.
+**Mechanism:**
+- Splits the **Column Parallel Linear** layer (`W_gate`, `W_query`) to avoid communication before activation functions.
+- Splits the **Row Parallel Linear** layer (`W_down`, `W_out`) and aggregates results via a single, efficient **All-Reduce** operation at the layer boundary.
 
-### Important Note
+### 2. Pipeline Parallelism (PP)
 
-Jupyterhub tries to keep your session alive, so if you navigate away and then come
-back later, your notebook will still be there and it will initially seem to be
-working, but then commands in the notebook will start failing and complaining
-about "stale file handles". If this happens, you need to go to "control panel"
-and stop your server and then restart it.
+**Strategy:** Inter-layer splitting that partitions model layers sequentially across distinct devices.
 
-## Cloning the Lab Repo
+**Mechanism:**
+- Implements a **1F1B (One Forward, One Backward)** schedule where micro-batches are pipelined concurrently.
+- Devices exchange activation tensors and gradients only at boundaries via **point-to-point (P2P)** communication, significantly reducing the activation memory footprint.
 
-First, accept the assignement on Github Classroom.  It's available via the
-CS203 [home page](https://www.escalab.org/classes/cs203-2025fa/).
+### 3. Data Parallelism (DP) & ZeRO
 
-This will set you up with a copy of the starter repository.
+**Strategy:** Inter-node scaling by replicating parallelized model chunks across data shards.
 
-**Note**: Be sure to use the **`ssh`** method to checkout your repo rather than `http`.  Authentication over ssh is much simpler and it's what our tools assume.  If you try to use HTTP, you'll get something like:
+**Mechanism:**
+- Integrates **Zero Redundancy Optimizer (ZeRO)** concepts to shard optimizer states and gradients across data-parallel ranks, eliminating duplicate memory allocations.
+
+---
+
+## 📂 Architecture & Directory Structure
 
 ```
-[htseng@datahub]$ git clone https://github.com/cs203ucsd/2025fa-cs203-hello-hungweitseng.git
-Cloning into '2025fa-cs203-hello-hungweitseng'...
-Username for 'https://github.com': hungweitseng
-Password for 'https://hungweitseng@github.com': 
-remote: Support for password authentication was removed on August 13, 2021.
-remote: Please see https://docs.github.com/en/get-started/getting-started-with-git/about-remote-repositories#cloning-with-https-urls for information on currently recommended modes of authentication.
-fatal: Authentication failed for 'https://github.com/cs203ucsd/2025fa-cs203-welcome-hungweitseng.git/'
+├── configs/               # Topology definitions (e.g., TP=2, PP=2, DP=2)
+├── src/
+│   ├── communication/     # Custom collective primitives (All-Reduce wrappers, P2P ring)
+│   ├── layers/            # ColumnParallelLinear and RowParallelLinear PyTorch modules
+│   ├── schedules/         # 1F1B and interleaved pipeline execution logic
+│   └── models/            # Core transformer blocks optimized for distributed splitting
+├── main.py                # Distributed runtime initialization and benchmarking engine
+└── requirements.txt       # Core dependencies (PyTorch, NCCL, etc.)
 ```
 
+---
 
+## 🚀 Step-by-Step Implementation Guide
 
-You'll need to open a terminal from jupyterhub.  From the file browser, select "new->terminal" from the menu in the upper right.
+### 1. Environment Verification
 
-You may need to create an ssh key and add it to your github account.  You can create the key with (in your jupyterhub terminal):
+Ensure your environment recognizes your cluster topology and has the NCCL backend properly configured:
 
-```
-ssh-keygen
-```
-
-and accept the defaults.  I recommend no password, so you don't have to type it all the time.
-
-Then view your new public key:
-
-```
-cat ~/.ssh/id_rsa.pub
+```bash
+python -c "import torch; print(f'GPUs Available: {torch.cuda.device_count()}, NCCL Available: {torch.distributed.is_nccl_available()}')"
 ```
 
-Then follow these instructions:
+### 2. Installation
 
-https://docs.github.com/en/github/authenticating-to-github/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account
+Clone the repository and set up a localized Python environment:
 
-After you have done, you can again `git clone` the repo locally.
+```bash
+git clone https://github.com/rohantikotekar/llm-parallelism.git
+cd llm-parallelism
+pip install -r requirements.txt
+```
 
+### 3. Setting the Topology Configuration
 
-## Open the Notebook
+Define your cluster topology matrix inside a configuration file (e.g., `configs/3d_mesh_8gpus.yaml`). For an 8-GPU cluster, a typical 3D partition looks like this:
 
-Switch to the tab with file browser and navigate to the directory you just cloned.   Click on `assignment-lab.ipynb` to open the lab and get to work!
+```yaml
+# Cluster Topology Matrix
+parallelism:
+  tensor_parallel_size: 2
+  pipeline_parallel_size: 2
+  data_parallel_size: 2  # Total Ranks = TP * PP * DP = 8
 
-**Note:** You'll need to trust the notebook when Jupyter asks.
+model:
+  hidden_size: 4096
+  num_layers: 32
+  num_heads: 32
+```
+
+### 4. Launching the Multi-GPU Cluster
+
+Execute the distributed orchestrator using PyTorch's native elastic launch utility (`torchrun`).
+
+**Single Node, 8-GPU Run:**
+
+```bash
+torchrun \
+    --nproc_per_node=8 \
+    --master_port=29500 \
+    main.py --config configs/3d_mesh_8gpus.yaml
+```
+
+**Multi-Node Run (Example for Node 0):**
+
+```bash
+torchrun \
+    --nnodes=2 \
+    --node_rank=0 \
+    --master_addr="10.0.0.1" \
+    --master_port=29500 \
+    --nproc_per_node=8 \
+    main.py --config configs/3d_mesh_8gpus.yaml
+```
+
+---
+
+## 📊 Performance Benchmarking & Instrumentation
+
+The framework logs detailed telemetry to balance processing speed against communication bottlenecks:
+
+| Metric | Description |
+|---|---|
+| **TFLOPs/sec per GPU** | Tracks raw calculation efficiency against the theoretical hardware maximum |
+| **Comm/Comp Ratio** | Quantifies time spent on cross-device network transfers (`NCCL_AllReduce`, `P2P_Send_Recv`) versus actual matrix calculations |
+| **Memory Tracking** | Provides precise per-GPU peak VRAM breakdown across weights, gradients, and activation buffers |
+
+---
+
+## 📄 License
+
+This project is open-source. See [`LICENSE`](LICENSE) for details.
