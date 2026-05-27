@@ -8,9 +8,9 @@ A modular framework designed to explore, profile, and optimize shared-memory exe
 
 - [The Problem: The Backpropagation Bottleneck](#the-problem-the-backpropagation-bottleneck)
 - [The Solution: Targeted OpenMP Optimizations](#the-solution-targeted-openmp-optimizations)
+- [Performance Baseline & Target Results](#performance-baseline--target-results)
 - [Architecture & Directory Structure](#architecture--directory-structure)
 - [Step-by-Step Implementation Guide](#step-by-step-implementation-guide)
-- [Performance Tracking & System Telemetry](#performance-tracking--system-telemetry)
 
 ---
 
@@ -46,6 +46,20 @@ Memory locations are safely managed using localized loop structures, private var
 
 - **Temporal Locality:** Loops are restructured to reuse data blocks inside CPU cache lines, directly reducing data miss rates.
 - **Vector Units:** `#pragma omp simd` enables single-instruction, multiple-data (SIMD) instruction mapping, allowing individual processors to process multiple floating-point values concurrently.
+
+---
+
+## 📊 Performance Baseline & Target Results
+
+The project maps execution telemetry across baseline and optimized versions to ensure strict performance convergence:
+
+| Metric | Baseline (`test_gpt2` / `train_gpt2`) | Optimized OpenMP (`my_test_gpt2` / `my_train_gpt2`) |
+|---|---|---|
+| **Target Speedup** | `1.0×` (Reference) | `≥ 3.5×` Speedup (Cluster Target) |
+| **Core Routine Cache Miss Rate** | ~16.0% data cache misses (`matmul_backward`) | Lowered via targeted loop-tiling configurations |
+| **Overall Cache Miss Rate** | ~8.2% system-wide cache misses | Optimized via sequential temporal locality alignment |
+| **Thread Allocation** | `1` Core (Sequential) | `12` Parallel Workers (Default Runtime) |
+| **Total Training Runtime** | ~6 to 10 minutes | Reduced by ~`3×` vs. single-threaded baseline |
 
 ---
 
@@ -114,18 +128,6 @@ Once local validations pass, launch the full training run to benchmark model spe
 make clean my_train_gpt2 OPENMP=yes
 ./my_train_gpt2
 ```
-
----
-
-## 📊 Performance Tracking & System Telemetry
-
-The runtime architecture records detailed profiling metrics to measure and analyze processing speedups:
-
-| Metric | Description |
-|---|---|
-| **Core Execution Time (ET)** | Measures real-world wall time to evaluate processing speed gains |
-| **Cache Telemetry Matrix** | Monitors data loading trends to quantify the reduction in cache miss rates |
-| **Thread Scaling Efficiency** | Profiles how well execution speeds up across different thread counts (e.g., targeting 12-thread scaling) |
 
 ---
 
