@@ -1,153 +1,131 @@
-# Axiom-Parallel: Multi-Dimensional LLM Distributed Training Infrastructure
+# Axiom-Parallel: Shared-Memory LLM Parallelism with OpenMP
 
-A highly structured, production-ready framework implementing multi-dimensional (3D) parallelism strategies for Large Language Models. This repository contains the core communication primitives, custom layer abstractions, and execution pipelines required to scale models that exceed individual GPU memory thresholds.
+A modular framework designed to explore, profile, and optimize shared-memory execution topologies for Large Language Models (LLMs) using pure C and OpenMP. By implementing compiler directives, loop transformations, and memory optimizations, this project addresses hardware bottlenecks during the backpropagation pass of a reproduced GPT-2 (124M parameter) model.
 
 ---
 
 ## 📌 Table of Contents
 
-- [The Problem: The Memory & Compute Wall](#the-problem-the-memory--compute-wall)
-- [The Solution: Unified 3D Parallelism](#the-solution-unified-3d-parallelism)
+- [The Problem: The Backpropagation Bottleneck](#the-problem-the-backpropagation-bottleneck)
+- [The Solution: Targeted OpenMP Optimizations](#the-solution-targeted-openmp-optimizations)
 - [Architecture & Directory Structure](#architecture--directory-structure)
 - [Step-by-Step Implementation Guide](#step-by-step-implementation-guide)
-- [Performance Benchmarking & Instrumentation](#performance-benchmarking--instrumentation)
+- [Performance Tracking & System Telemetry](#performance-tracking--system-telemetry)
 
 ---
 
-## 💡 The Problem: The Memory & Compute Wall
+## 💡 The Problem: The Backpropagation Bottleneck
 
-As Large Language Models scale past tens of billions of parameters, training or serving them on a single hardware accelerator becomes mathematically impossible due to two structural constraints:
+When training Large Language Models on multi-core CPU architectures, matrix arithmetic dominates execution time. Naive sequential computation engines cannot keep up with the vast number of floating-point operations (`FLOPs`) required for network parameter updates.
 
-- **The Memory Wall:** An `80GB` GPU cannot simultaneously hold model weights, optimizer states (e.g., Adam's FP32 copies), gradients, and activation tensors.
-- **The Compute Wall:** The trillions of floating-point operations (`FLOPs`) required for convergence make sequential or single-device execution logistically non-viable.
+Through systemic execution profiling via `linux perf record`, the computational profile shows that `matmul_backward` is the most time-consuming primitive.
 
-### Traditional Bottlenecks
+### Key Performance Barriers
 
 | Bottleneck | Root Cause |
 |---|---|
-| **Naive Data Parallelism** | The entire model must fit on every single GPU |
-| **Unoptimized Tensor Splitting** | Constant synchronization causes massive network latency during forward and backward passes |
-| **Pipeline Bubbles** | Poor execution scheduling leads to idle GPUs and severe resource underutilization |
+| **Data Write-Sharing Overhead** | Multiple processing units updating identical tensor element positions create severe multi-thread synchronization blocks |
+| **Cache Locality Degradation** | Large hidden dimensions introduce non-contiguous memory access sequences, leading to costly L1/L3 CPU cache miss rates |
+| **Idle Resource Cores** | Unparallelized loops leave powerful multi-socket CPU systems underutilized, lowering execution efficiency |
 
 ---
 
-## 🛠️ The Solution: Unified 3D Parallelism
+## 🛠️ The Solution: Targeted OpenMP Optimizations
 
-This repository implements **Multi-Dimensional (3D) Parallelism**, decoupling the model across three independent but complementary structural axes to maximize hardware utilization (MFU) and communication efficiency.
+This codebase speeds up the backward pass by applying standard compiler engineering and hardware-aware optimizations to `my_train_gpt2.h`.
 
-### 1. Tensor Parallelism (TP)
+### 1. Multi-Core Loop Scheduling
 
-**Strategy:** Intra-layer splitting across the hidden dimension, based on Megatron-style architectures.
+Using `#pragma omp parallel for`, outer execution loops are distributed across independent system threads. This divides massive hidden dimensions into balanced iterations, minimizing scheduling sync penalties.
 
-**Mechanism:**
-- Splits the **Column Parallel Linear** layer (`W_gate`, `W_query`) to avoid communication before activation functions.
-- Splits the **Row Parallel Linear** layer (`W_down`, `W_out`) and aggregates results via a single, efficient **All-Reduce** operation at the layer boundary.
+### 2. Synchronization Management
 
-### 2. Pipeline Parallelism (PP)
+Memory locations are safely managed using localized loop structures, private variables, or strict critical blocks (`#pragma omp critical`) — ensuring data-sharing updates to target arrays proceed without throughput degradation.
 
-**Strategy:** Inter-layer splitting that partitions model layers sequentially across distinct devices.
+### 3. Loop Tiling & SIMD Vectorization
 
-**Mechanism:**
-- Implements a **1F1B (One Forward, One Backward)** schedule where micro-batches are pipelined concurrently.
-- Devices exchange activation tensors and gradients only at boundaries via **point-to-point (P2P)** communication, significantly reducing the activation memory footprint.
-
-### 3. Data Parallelism (DP) & ZeRO
-
-**Strategy:** Inter-node scaling by replicating parallelized model chunks across data shards.
-
-**Mechanism:**
-- Integrates **Zero Redundancy Optimizer (ZeRO)** concepts to shard optimizer states and gradients across data-parallel ranks, eliminating duplicate memory allocations.
+- **Temporal Locality:** Loops are restructured to reuse data blocks inside CPU cache lines, directly reducing data miss rates.
+- **Vector Units:** `#pragma omp simd` enables single-instruction, multiple-data (SIMD) instruction mapping, allowing individual processors to process multiple floating-point values concurrently.
 
 ---
 
 ## 📂 Architecture & Directory Structure
 
 ```
-├── configs/               # Topology definitions (e.g., TP=2, PP=2, DP=2)
 ├── src/
-│   ├── communication/     # Custom collective primitives (All-Reduce wrappers, P2P ring)
-│   ├── layers/            # ColumnParallelLinear and RowParallelLinear PyTorch modules
-│   ├── schedules/         # 1F1B and interleaved pipeline execution logic
-│   └── models/            # Core transformer blocks optimized for distributed splitting
-├── main.py                # Distributed runtime initialization and benchmarking engine
-└── requirements.txt       # Core dependencies (PyTorch, NCCL, etc.)
+│   ├── layers/            # Core transformer layers optimized for distributed arrays
+│   ├── communication/     # Shared-memory message passing and buffer wrappers
+│   └── architecture/      # Structural configurations for multi-core scaling
+├── train_gpt2.c           # Main baseline training loop orchestrator
+├── train_gpt2.h           # Original sequential mathematical primitives
+├── my_train_gpt2.h        # Optimized multi-threaded execution implementations
+├── test_gpt2.c            # Validation engine for sequential computation checks
+├── my_test_gpt2.c         # Validation engine for optimized parallel tracking
+└── Makefile               # Build script with OpenMP compilation parameters
 ```
 
 ---
 
 ## 🚀 Step-by-Step Implementation Guide
 
-### 1. Environment Verification
+### 1. Environment & Dependencies Setup
 
-Ensure your environment recognizes your cluster topology and has the NCCL backend properly configured:
+Verify your environment includes the standard compiler flags necessary to build multi-threaded code blocks:
 
 ```bash
-python -c "import torch; print(f'GPUs Available: {torch.cuda.device_count()}, NCCL Available: {torch.distributed.is_nccl_available()}')"
+export OPENMP=yes
 ```
 
 ### 2. Installation
 
-Clone the repository and set up a localized Python environment:
+Clone and set up the localized project repository:
 
 ```bash
 git clone https://github.com/rohantikotekar/llm-parallelism.git
 cd llm-parallelism
-pip install -r requirements.txt
 ```
 
-### 3. Setting the Topology Configuration
+### 3. Compiling the Benchmarks
 
-Define your cluster topology matrix inside a configuration file (e.g., `configs/3d_mesh_8gpus.yaml`). For an 8-GPU cluster, a typical 3D partition looks like this:
-
-```yaml
-# Cluster Topology Matrix
-parallelism:
-  tensor_parallel_size: 2
-  pipeline_parallel_size: 2
-  data_parallel_size: 2  # Total Ranks = TP * PP * DP = 8
-
-model:
-  hidden_size: 4096
-  num_layers: 32
-  num_heads: 32
-```
-
-### 4. Launching the Multi-GPU Cluster
-
-Execute the distributed orchestrator using PyTorch's native elastic launch utility (`torchrun`).
-
-**Single Node, 8-GPU Run:**
+To test optimizations without executing full training sequences, build the scaled-down profiling targets:
 
 ```bash
-torchrun \
-    --nproc_per_node=8 \
-    --master_port=29500 \
-    main.py --config configs/3d_mesh_8gpus.yaml
+# Build both baseline and custom parallel binaries
+make clean test_gpt2 my_test_gpt2 OPENMP=yes
 ```
 
-**Multi-Node Run (Example for Node 0):**
+### 4. Running Execution Validations
+
+Execute the test files to verify your parallelized implementation against the sequential baseline:
 
 ```bash
-torchrun \
-    --nnodes=2 \
-    --node_rank=0 \
-    --master_addr="10.0.0.1" \
-    --master_port=29500 \
-    --nproc_per_node=8 \
-    main.py --config configs/3d_mesh_8gpus.yaml
+# Evaluate baseline output profiles
+./test_gpt2
+
+# Evaluate multi-threaded execution speeds
+./my_test_gpt2
+```
+
+### 5. Running the Complete Training Engine
+
+Once local validations pass, launch the full training run to benchmark model speedups across multiple processing threads:
+
+```bash
+make clean my_train_gpt2 OPENMP=yes
+./my_train_gpt2
 ```
 
 ---
 
-## 📊 Performance Benchmarking & Instrumentation
+## 📊 Performance Tracking & System Telemetry
 
-The framework logs detailed telemetry to balance processing speed against communication bottlenecks:
+The runtime architecture records detailed profiling metrics to measure and analyze processing speedups:
 
 | Metric | Description |
 |---|---|
-| **TFLOPs/sec per GPU** | Tracks raw calculation efficiency against the theoretical hardware maximum |
-| **Comm/Comp Ratio** | Quantifies time spent on cross-device network transfers (`NCCL_AllReduce`, `P2P_Send_Recv`) versus actual matrix calculations |
-| **Memory Tracking** | Provides precise per-GPU peak VRAM breakdown across weights, gradients, and activation buffers |
+| **Core Execution Time (ET)** | Measures real-world wall time to evaluate processing speed gains |
+| **Cache Telemetry Matrix** | Monitors data loading trends to quantify the reduction in cache miss rates |
+| **Thread Scaling Efficiency** | Profiles how well execution speeds up across different thread counts (e.g., targeting 12-thread scaling) |
 
 ---
 
